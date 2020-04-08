@@ -21,7 +21,7 @@ var (
 	state = "abc123"
 )
 
-func CreateSpotifyClient() *spotify.Client{
+func CreateSpotifyClient() *spotify.Client {
 	// first start an HTTP server
 	http.HandleFunc("/callback", completeAuth)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -133,8 +133,8 @@ func ScrapeTracksFromPlaylist() ([]string, error) {
 	}
 	var tracks []string
 	for _, p := range paragraphs {
-		text := p.Text()
-		text = strings.Replace(text,"↑ ", "", 1)
+		text := p.FullText()
+		text = strings.Replace(text, "↑ ", "", 1)
 		if r.MatchString(text) {
 			tracks = append(tracks, text)
 		}
