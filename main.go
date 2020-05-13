@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"regexp"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/anaskhan96/soup"
 	log "github.com/sirupsen/logrus"
 	"github.com/zmb3/spotify"
+	"golang.org/x/oauth2"
 )
 
 const playlistURL = "https://www.bbc.co.uk/programmes/articles/2sgpCPqVPgjqC7tHBb97kd9/the-1xtra-playlist"
@@ -40,6 +43,11 @@ func CreateSpotifyClient() *spotify.Client {
 
 func completeAuth(w http.ResponseWriter, r *http.Request) {
 	tok, err := auth.Token(state, r)
+	data, err := json.Marshal(tok)
+	if err != nil {
+		log.Fatal("Can't save token to disk")
+	}
+	log.WithField("token", string(data)).Info("Here's the token...")
 	if err != nil {
 		http.Error(w, "Couldn't get token", http.StatusForbidden)
 		log.Fatal(err)
@@ -54,17 +62,54 @@ func completeAuth(w http.ResponseWriter, r *http.Request) {
 	ch <- &client
 }
 
+func CreateSpotifyClientFromSavedToken() *spotify.Client {
+	auth.SetAuthInfo("72e5fca8b6d34b3b912ddd620c2c2bd3", "7152279e600a4e2892685dda6eb55b65")
+	data, err := ioutil.ReadFile("token.json")
+	if err != nil {
+		log.WithError(err).Fatal("Couldn't load token file")
+	}
+
+	var tok oauth2.Token
+	err = json.Unmarshal(data, &tok)
+	if err != nil {
+		log.WithError(err).Fatal("Couldn't unmarshal token")
+	}
+
+	client := auth.NewClient(&tok)
+
+	return &client
+}
+
+func BuildTrackQueries(tracks []string) []string {
+	var queries []string
+	for _, track := range tracks {
+		// Sanitize query by replacing strings that make Spotify unhappy
+		track = strings.ReplaceAll(track, " featuring ", " ")
+		track = strings.ReplaceAll(track, " ft ", " ")
+		track = strings.ReplaceAll(track, " x ", " ")
+		track = strings.ReplaceAll(track, " & ", " ")
+		// Multiple songs in one line
+		if strings.Contains(track, "/") {
+			// Split query into artist and song
+			s := strings.Split(track, "-")
+			artist := s[0]
+			songs := strings.Split(s[1], "/")
+			for _, s := range songs {
+				queries = append(queries, fmt.Sprintf("%s - %s", artist, s))
+			}
+		} else {
+			queries = append(queries, track)
+		}
+	}
+	return queries
+}
+
 // SearchTracksOnSpotifyAndCreatePlaylist finds tracks and adds them to playlist for the
 // authorized user
 func SearchTracksOnSpotifyAndCreatePlaylist(client *spotify.Client, trackQueries []string) error {
 	// Find all tracks and collect them
 	var fullTracks []spotify.FullTrack
 	for _, query := range trackQueries {
-		// Sanitize query by replacing strings that make Spotify unhappy
-		query = strings.ReplaceAll(query, " featuring ", " ")
-		query = strings.ReplaceAll(query, " ft ", " ")
-		query = strings.ReplaceAll(query, " x ", " ")
-		query = strings.ReplaceAll(query, " & ", " ")
 		result, err := client.Search(query, spotify.SearchTypeTrack)
 		if err != nil {
 			log.Fatalf("couldn't find query: %v", err)
@@ -144,15 +189,17 @@ func ScrapeTracksFromPlaylist() ([]string, error) {
 
 func main() {
 	tracks, err := ScrapeTracksFromPlaylist()
+	tracks = BuildTrackQueries(tracks)
 	if err != nil {
 		log.WithError(err).Fatal("Couldn't parse BBC playlist")
 	}
 
-	client := CreateSpotifyClient()
-	_, err = client.CurrentUser()
+	client := CreateSpotifyClientFromSavedToken()
+	u, err := client.CurrentUser()
 	if err != nil {
 		log.WithError(err).Fatal("Couldn't create Spotify client")
 	}
+	log.WithField("user", fmt.Sprintf("%v", u)).Info("Authenticated")
 
 	err = SearchTracksOnSpotifyAndCreatePlaylist(client, tracks)
 	if err != nil {
