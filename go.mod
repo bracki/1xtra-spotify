@@ -3,6 +3,7 @@ module github.com/bracki/1xtra-spotify
 go 1.13
 
 require (
+	github.com/PuerkitoBio/goquery v1.5.1
 	github.com/anaskhan96/soup v1.1.1
 	github.com/sirupsen/logrus v1.5.0
 	github.com/zmb3/spotify v0.0.0-20200331200324-6a9312f5d1de

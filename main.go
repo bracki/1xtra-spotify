@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anaskhan96/soup"
+	"github.com/PuerkitoBio/goquery"
 	log "github.com/sirupsen/logrus"
 	"github.com/zmb3/spotify"
 	"golang.org/x/oauth2"
@@ -163,32 +163,47 @@ func SearchTracksOnSpotifyAndCreatePlaylist(client *spotify.Client, trackQueries
 
 // ScrapeTracksFromPlaylist parses the tracks from the BBC 1xtra playlist website
 func ScrapeTracksFromPlaylist() ([]string, error) {
-	resp, err := soup.Get(playlistURL)
-
+	// Request the HTML page.
+	res, err := http.Get(playlistURL)
 	if err != nil {
-		return nil, err
+		log.Fatal(err)
 	}
-	doc := soup.HTMLParse(resp)
-	prog := doc.Find("div", "class", "prog-layout")
-	paragraphs := prog.FindAll("p")
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		log.Fatalf("status code error: %d %s", res.StatusCode, res.Status)
+	}
 
+	// Load the HTML document
+	doc, err := goquery.NewDocumentFromReader(res.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Find the tracks
 	r, err := regexp.Compile(".* - .*")
 	if err != nil {
 		return nil, err
 	}
 	var tracks []string
-	for _, p := range paragraphs {
-		text := p.FullText()
-		text = strings.Replace(text, "↑ ", "", 1)
-		if r.MatchString(text) {
-			tracks = append(tracks, text)
-		}
-	}
+	doc.Find(".prog-layout .text--prose").Each(func(i int, s *goquery.Selection) {
+		// For each item found, scrape the track
+		s.Find("p").Contents().Each(func(i int, s *goquery.Selection) {
+			if !s.Is("br") {
+				text := strings.Replace(s.Text(), "↑ ", "", 1)
+				if r.MatchString(text) {
+					tracks = append(tracks, text)
+				}
+			}
+		})
+	})
 	return tracks, nil
 }
 
 func main() {
 	tracks, err := ScrapeTracksFromPlaylist()
+	if err != nil {
+		log.WithError(err).Fatal("doof")
+	}
 	tracks = BuildTrackQueries(tracks)
 	if err != nil {
 		log.WithError(err).Fatal("Couldn't parse BBC playlist")
