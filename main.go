@@ -110,15 +110,34 @@ func SearchTracksOnSpotifyAndCreatePlaylist(client *spotify.Client, trackQueries
 	// Find all tracks and collect them
 	var fullTracks []spotify.FullTrack
 	for _, query := range trackQueries {
+		log.WithField("query", query).Info("Searching for song")
 		result, err := client.Search(query, spotify.SearchTypeTrack)
 		if err != nil {
 			log.Fatalf("couldn't find query: %v", err)
 		}
 		if result.Tracks.Total < 1 {
-			log.WithField("query", query).Info("Couldn't find query")
-		} else {
+			log.WithField("query", query).Info("Couldn't find title")
+			// Try with a simplified query
+			parts := strings.Split(query, "-")
+			artists := strings.TrimSpace(parts[0])
+			title := strings.TrimSpace(parts[1])
+			names := strings.Split(artists, " ")
+			query = fmt.Sprintf("%s - %s", names[0], title)
+			log.WithField("query", query).Info("Searching for song w/ simplified query")
+			result, err = client.Search(query, spotify.SearchTypeTrack)
+			if err != nil {
+				log.Fatalf("couldn't find query: %v", err)
+			}
+			if result.Tracks.Total < 1 {
+				log.WithField("query", query).Info("Couldn't find title with simplified query")
+			}
+		}
+		if result.Tracks.Total > 0 {
+			log.WithField("track", result.Tracks.Tracks[0]).WithField("query", query).Info("Adding track")
 			fmt.Println(result.Tracks.Tracks[0])
 			fullTracks = append(fullTracks, result.Tracks.Tracks[0])
+		} else {
+			log.WithField("query", query).Warn("Track not found")
 		}
 	}
 
