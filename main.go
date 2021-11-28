@@ -88,6 +88,7 @@ func BuildTrackQueries(tracks []string) []string {
 		track = strings.ReplaceAll(track, " ft ", " ")
 		track = strings.ReplaceAll(track, " x ", " ")
 		track = strings.ReplaceAll(track, " & ", " ")
+		track = strings.ReplaceAll(track, "*", " ")
 		// Multiple songs in one line
 		if strings.Contains(track, "/") {
 			// Split query into artist and song
@@ -134,7 +135,6 @@ func SearchTracksOnSpotifyAndCreatePlaylist(client *spotify.Client, trackQueries
 		}
 		if result.Tracks.Total > 0 {
 			log.WithField("track", result.Tracks.Tracks[0]).WithField("query", query).Info("Adding track")
-			fmt.Println(result.Tracks.Tracks[0])
 			fullTracks = append(fullTracks, result.Tracks.Tracks[0])
 		} else {
 			log.WithField("query", query).Warn("Track not found")
