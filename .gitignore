@@ -1,2 +1,5 @@
 .idea/
 *.iml
+
+# compiled binary
+/1xtra-spotify
