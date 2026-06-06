@@ -1,0 +1,4 @@
+anthropic>=0.40
+spotipy>=2.23
+requests>=2.31
+beautifulsoup4>=4.12

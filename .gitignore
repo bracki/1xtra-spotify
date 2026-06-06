@@ -1,2 +1,7 @@
 .idea/
 *.iml
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+token.json
