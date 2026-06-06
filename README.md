@@ -37,6 +37,44 @@ hardcoded and nothing is written to disk.
 A resulting playlist looks like:
 <https://open.spotify.com/playlist/4btEltH544et7aIypESPRO>
 
+## Repeatable headless rebuild (`rebuild.py`)
+
+The web app above makes you click through OAuth on every run. Once you've
+authorised **once**, `rebuild.py` lets you rebuild the playlist any time with a
+single command and **no interaction** — ideal for a cron job or a button.
+
+It improves on the Go flow in two ways:
+
+- **No client secret.** It uses the Authorization Code + **PKCE** refresh grant,
+  so the (burned) secret in this repo's history is never needed.
+- **Survives a blocked BBC fetch.** If the BBC page can't be fetched directly
+  (e.g. a sandbox egress allowlist), it falls back to a reader proxy.
+
+### One-time setup: get a refresh token
+
+Run the PKCE authorization-code flow once (scopes `playlist-modify-public`,
+`playlist-modify-private`, `user-read-private`) and keep the **refresh token**
+it returns. Then:
+
+```
+cp .env.example .env      # fill in SPOTIFY_REFRESH_TOKEN and ANTHROPIC_API_KEY
+python3 rebuild.py
+```
+
+`.env` is gitignored — credentials never get committed. If Spotify rotates the
+refresh token, the script prints the new one to save.
+
+### Flags
+
+```
+python3 rebuild.py                      # scrape + Claude extract + search + write
+python3 rebuild.py --dry-run            # everything except writing the playlist
+python3 rebuild.py --queries-file f.txt # skip scrape/extract; use a manual track list
+python3 rebuild.py --name "My playlist" # override the playlist name
+```
+
+No third-party Python packages required (standard library only).
+
 ## Running in Claude Code on the web
 
 This app talks to Spotify and the BBC, which are **not** on the default

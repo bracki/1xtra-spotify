@@ -3,3 +3,7 @@
 
 # compiled binary
 /1xtra-spotify
+
+# local credentials for rebuild.py — never commit
+.env
+__pycache__/
