@@ -1,242 +1,290 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"html/template"
 	"net/http"
-	"regexp"
-	"strings"
+	"sync"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	log "github.com/sirupsen/logrus"
 	"github.com/zmb3/spotify"
-	"golang.org/x/oauth2"
 )
 
-const playlistURL = "https://www.bbc.co.uk/programmes/articles/2sgpCPqVPgjqC7tHBb97kd9/the-1xtra-playlist"
-const redirectURI = "http://localhost:8080/callback"
-
-var (
-	auth  = spotify.NewAuthenticator(redirectURI, spotify.ScopeUserReadPrivate, spotify.ScopePlaylistModifyPrivate, spotify.ScopePlaylistModifyPublic)
-	ch    = make(chan *spotify.Client)
-	state = "abc123"
+const (
+	listenAddr  = ":8080"
+	redirectURI = "http://localhost:8080/callback"
 )
 
-func CreateSpotifyClient() *spotify.Client {
-	// first start an HTTP server
-	http.HandleFunc("/callback", completeAuth)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		log.Println("Got request for:", r.URL.String())
-	})
-	go http.ListenAndServe(":8080", nil)
+// app holds the (single-user) runtime state for the tool: the credentials the
+// user typed into the website and the resulting Spotify client.
+type app struct {
+	mu sync.Mutex
 
-	url := auth.AuthURL(state)
-	fmt.Println("Please log in to Spotify by visiting the following page in your browser:", url)
+	anthropicKey  string
+	spotifyID     string
+	spotifySecret string
 
-	// wait for auth to complete
-	client := <-ch
+	auth   spotify.Authenticator
+	state  string
+	client *spotify.Client
+	user   string
 
-	return client
+	lastResult *GenerateResult
+	lastError  string
 }
 
-func completeAuth(w http.ResponseWriter, r *http.Request) {
-	tok, err := auth.Token(state, r)
-	data, err := json.Marshal(tok)
-	if err != nil {
-		log.Fatal("Can't save token to disk")
-	}
-	log.WithField("token", string(data)).Info("Here's the token...")
-	if err != nil {
-		http.Error(w, "Couldn't get token", http.StatusForbidden)
-		log.Fatal(err)
-	}
-	if st := r.FormValue("state"); st != state {
-		http.NotFound(w, r)
-		log.Fatalf("State mismatch: %s != %s\n", st, state)
-	}
-	// use the token to get an authenticated client
-	client := auth.NewClient(tok)
-	fmt.Fprintf(w, "Login Completed!")
-	ch <- &client
-}
-
-func CreateSpotifyClientFromSavedToken() *spotify.Client {
-	auth.SetAuthInfo("72e5fca8b6d34b3b912ddd620c2c2bd3", "7152279e600a4e2892685dda6eb55b65")
-	data, err := ioutil.ReadFile("token.json")
-	if err != nil {
-		log.WithError(err).Fatal("Couldn't load token file")
-	}
-
-	var tok oauth2.Token
-	err = json.Unmarshal(data, &tok)
-	if err != nil {
-		log.WithError(err).Fatal("Couldn't unmarshal token")
-	}
-
-	client := auth.NewClient(&tok)
-
-	return &client
-}
-
-func BuildTrackQueries(tracks []string) []string {
-	var queries []string
-	for _, track := range tracks {
-		// Sanitize query by replacing strings that make Spotify unhappy
-		track = strings.ReplaceAll(track, " featuring ", " ")
-		track = strings.ReplaceAll(track, " ft ", " ")
-		track = strings.ReplaceAll(track, " x ", " ")
-		track = strings.ReplaceAll(track, " & ", " ")
-		track = strings.ReplaceAll(track, "*", " ")
-		// Multiple songs in one line
-		if strings.Contains(track, "/") {
-			// Split query into artist and song
-			s := strings.Split(track, "-")
-			artist := s[0]
-			songs := strings.Split(s[1], "/")
-			for _, s := range songs {
-				queries = append(queries, fmt.Sprintf("%s - %s", artist, s))
-			}
-		} else {
-			queries = append(queries, track)
-		}
-	}
-	return queries
-}
-
-// SearchTracksOnSpotifyAndCreatePlaylist finds tracks and adds them to playlist for the
-// authorized user
-func SearchTracksOnSpotifyAndCreatePlaylist(client *spotify.Client, trackQueries []string) error {
-	// Find all tracks and collect them
-	var fullTracks []spotify.FullTrack
-	for _, query := range trackQueries {
-		log.WithField("query", query).Info("Searching for song")
-		result, err := client.Search(query, spotify.SearchTypeTrack)
-		if err != nil {
-			log.Fatalf("couldn't find query: %v", err)
-		}
-		if result.Tracks.Total < 1 {
-			log.WithField("query", query).Info("Couldn't find title")
-			// Try with a simplified query
-			parts := strings.Split(query, "-")
-			artists := strings.TrimSpace(parts[0])
-			title := strings.TrimSpace(parts[1])
-			names := strings.Split(artists, " ")
-			query = fmt.Sprintf("%s - %s", names[0], title)
-			log.WithField("query", query).Info("Searching for song w/ simplified query")
-			result, err = client.Search(query, spotify.SearchTypeTrack)
-			if err != nil {
-				log.Fatalf("couldn't find query: %v", err)
-			}
-			if result.Tracks.Total < 1 {
-				log.WithField("query", query).Info("Couldn't find title with simplified query")
-			}
-		}
-		if result.Tracks.Total > 0 {
-			log.WithField("track", result.Tracks.Tracks[0]).WithField("query", query).Info("Adding track")
-			fullTracks = append(fullTracks, result.Tracks.Tracks[0])
-		} else {
-			log.WithField("query", query).Warn("Track not found")
-		}
-	}
-
-	// Create a playlist featuring all the tracks for the current user
-	user, err := client.CurrentUser()
-	if err != nil {
-		return err
-	}
-	playlistsForUser, err := client.GetPlaylistsForUser(user.ID)
-	if err != nil {
-		return err
-	}
-	playlistName := "BBC 1xtra badman ting"
-	var playlistID spotify.ID
-	for _, p := range playlistsForUser.Playlists {
-		if p.Name == playlistName {
-			playlistID = p.ID
-		}
-	}
-	if playlistID == "" {
-		playlist, err := client.CreatePlaylistForUser(user.ID, "BBC 1xtra badman ting", "Automatically scraped from the BBC website", true)
-		if err != nil {
-			return err
-		}
-		playlistID = playlist.ID
-	}
-	var trackIDs []spotify.ID
-	for _, track := range fullTracks {
-		trackIDs = append(trackIDs, track.ID)
-	}
-	date := time.Now().Format(time.RFC3339)
-	err = client.ChangePlaylistDescription(playlistID, fmt.Sprintf("Automatically scraped from the BBC website - %v", date))
-	if err != nil {
-		return err
-	}
-	err = client.ReplacePlaylistTracks(playlistID, trackIDs...)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// ScrapeTracksFromPlaylist parses the tracks from the BBC 1xtra playlist website
-func ScrapeTracksFromPlaylist() ([]string, error) {
-	// Request the HTML page.
-	res, err := http.Get(playlistURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		log.Fatalf("status code error: %d %s", res.StatusCode, res.Status)
-	}
-
-	// Load the HTML document
-	doc, err := goquery.NewDocumentFromReader(res.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Find the tracks
-	r, err := regexp.Compile(".* - .*")
-	if err != nil {
-		return nil, err
-	}
-	var tracks []string
-	doc.Find(".prog-layout .text--prose").Each(func(i int, s *goquery.Selection) {
-		// For each item found, scrape the track
-		s.Find("p").Contents().Each(func(i int, s *goquery.Selection) {
-			if !s.Is("br") {
-				text := strings.Replace(s.Text(), "↑ ", "", 1)
-				if r.MatchString(text) {
-					tracks = append(tracks, text)
-				}
-			}
-		})
-	})
-	return tracks, nil
-}
+var a = &app{}
 
 func main() {
-	tracks, err := ScrapeTracksFromPlaylist()
-	if err != nil {
-		log.WithError(err).Fatal("doof")
-	}
-	tracks = BuildTrackQueries(tracks)
-	if err != nil {
-		log.WithError(err).Fatal("Couldn't parse BBC playlist")
-	}
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/config", handleConfig)
+	http.HandleFunc("/login", handleLogin)
+	http.HandleFunc("/callback", handleCallback)
+	http.HandleFunc("/generate", handleGenerate)
 
-	client := CreateSpotifyClientFromSavedToken()
-	u, err := client.CurrentUser()
-	if err != nil {
-		log.WithError(err).Fatal("Couldn't create Spotify client")
-	}
-	log.WithField("user", fmt.Sprintf("%v", u)).Info("Authenticated")
-
-	err = SearchTracksOnSpotifyAndCreatePlaylist(client, tracks)
-	if err != nil {
-		log.WithError(err).Fatal("Couldn't create Spotify playlist")
+	log.WithField("url", "http://localhost"+listenAddr).Info("1xtra-spotify is running — open this in your browser")
+	if err := http.ListenAndServe(listenAddr, nil); err != nil {
+		log.WithError(err).Fatal("server stopped")
 	}
 }
+
+// configured reports whether all three credentials have been supplied.
+func (a *app) configured() bool {
+	return a.anthropicKey != "" && a.spotifyID != "" && a.spotifySecret != ""
+}
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	render(w)
+}
+
+// handleConfig stores the credentials the user submitted and prepares the
+// Spotify authenticator.
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.anthropicKey = r.FormValue("anthropic_key")
+	a.spotifyID = r.FormValue("spotify_id")
+	a.spotifySecret = r.FormValue("spotify_secret")
+
+	// Reset any previous Spotify session — the credentials may have changed.
+	a.client = nil
+	a.user = ""
+
+	if a.configured() {
+		auth := spotify.NewAuthenticator(redirectURI,
+			spotify.ScopeUserReadPrivate,
+			spotify.ScopePlaylistModifyPrivate,
+			spotify.ScopePlaylistModifyPublic,
+		)
+		auth.SetAuthInfo(a.spotifyID, a.spotifySecret)
+		a.auth = auth
+		a.state = randomState()
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.configured() {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, a.auth.AuthURL(a.state), http.StatusSeeOther)
+}
+
+func handleCallback(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.configured() {
+		http.Error(w, "credentials not configured", http.StatusBadRequest)
+		return
+	}
+
+	tok, err := a.auth.Token(a.state, r)
+	if err != nil {
+		log.WithError(err).Error("couldn't get Spotify token")
+		http.Error(w, "couldn't get Spotify token: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	client := a.auth.NewClient(tok)
+	a.client = &client
+
+	if u, err := client.CurrentUser(); err == nil {
+		a.user = u.DisplayName
+		if a.user == "" {
+			a.user = u.ID
+		}
+	}
+	log.WithField("user", a.user).Info("Spotify connected")
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleGenerate runs the whole pipeline: fetch the BBC page, have Claude
+// extract the tracklist, then search Spotify and (re)build the playlist.
+func handleGenerate(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.lastResult = nil
+	a.lastError = ""
+
+	if a.client == nil {
+		a.lastError = "Connect Spotify before generating a playlist."
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+
+	pageHTML, err := FetchPlaylistPage(ctx)
+	if err != nil {
+		a.lastError = "Couldn't fetch the BBC playlist page: " + err.Error()
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	queries, err := ExtractTrackQueries(ctx, a.anthropicKey, pageHTML)
+	if err != nil {
+		a.lastError = "Claude couldn't extract the tracklist: " + err.Error()
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	log.WithField("count", len(queries)).Info("Claude extracted tracks")
+
+	result, err := BuildPlaylist(a.client, queries)
+	if err != nil {
+		a.lastError = "Couldn't build the Spotify playlist: " + err.Error()
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	a.lastResult = result
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func randomState() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// --- view ---
+
+type viewData struct {
+	Configured       bool
+	SpotifyConnected bool
+	SpotifyUser      string
+	Result           *GenerateResult
+	Error            string
+}
+
+func render(w http.ResponseWriter) {
+	data := viewData{
+		Configured:       a.configured(),
+		SpotifyConnected: a.client != nil,
+		SpotifyUser:      a.user,
+		Result:           a.lastResult,
+		Error:            a.lastError,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := pageTmpl.Execute(w, data); err != nil {
+		log.WithError(err).Error("rendering page")
+	}
+}
+
+var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBC 1Xtra → Spotify (powered by Claude)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.6rem; }
+  .step { border: 1px solid #8884; border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; }
+  .done { border-color: #2ecc7088; }
+  label { display: block; font-weight: 600; margin-top: .75rem; }
+  input[type=text], input[type=password] { width: 100%; padding: .5rem; margin-top: .25rem; box-sizing: border-box; border-radius: 6px; border: 1px solid #8888; }
+  button { margin-top: 1rem; padding: .6rem 1.1rem; font-size: 1rem; border-radius: 8px; border: 0; background: #1db954; color: #fff; cursor: pointer; }
+  button:disabled { background: #8884; cursor: not-allowed; }
+  .muted { color: #8a8a8a; font-size: .9rem; }
+  .badge { font-size: .8rem; padding: .1rem .5rem; border-radius: 999px; background: #2ecc7033; color: #1a9e5a; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #8883; font-size: .92rem; }
+  .miss { color: #d33; }
+  .err { background: #ff525233; border: 1px solid #d33; padding: .75rem 1rem; border-radius: 8px; }
+</style>
+</head>
+<body>
+  <h1>BBC 1Xtra → Spotify 🎧</h1>
+  <p class="muted">Scrapes the BBC 1Xtra playlist with <strong>Claude</strong> and rebuilds it as a Spotify playlist. Your credentials stay in memory on this machine and are never written to disk.</p>
+
+  {{if .Error}}<div class="err">⚠️ {{.Error}}</div>{{end}}
+
+  <div class="step {{if .Configured}}done{{end}}">
+    <h2>1. Credentials {{if .Configured}}<span class="badge">configured</span>{{end}}</h2>
+    <p class="muted">Spotify app credentials come from your <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a>. Add <code>{{/* */}}http://localhost:8080/callback</code> as a Redirect URI there. The Anthropic key is used for the scraping step.</p>
+    <form method="post" action="/config">
+      <label>Anthropic API key</label>
+      <input type="password" name="anthropic_key" placeholder="sk-ant-..." autocomplete="off">
+      <label>Spotify Client ID</label>
+      <input type="text" name="spotify_id" autocomplete="off">
+      <label>Spotify Client Secret</label>
+      <input type="password" name="spotify_secret" autocomplete="off">
+      <button type="submit">Save credentials</button>
+    </form>
+  </div>
+
+  <div class="step {{if .SpotifyConnected}}done{{end}}">
+    <h2>2. Connect Spotify {{if .SpotifyConnected}}<span class="badge">connected{{if .SpotifyUser}} as {{.SpotifyUser}}{{end}}</span>{{end}}</h2>
+    <form method="get" action="/login">
+      <button type="submit" {{if not .Configured}}disabled{{end}}>
+        {{if .SpotifyConnected}}Reconnect Spotify{{else}}Connect Spotify{{end}}
+      </button>
+    </form>
+    {{if not .Configured}}<p class="muted">Save your credentials first.</p>{{end}}
+  </div>
+
+  <div class="step">
+    <h2>3. Generate the playlist</h2>
+    <form method="post" action="/generate">
+      <button type="submit" {{if not .SpotifyConnected}}disabled{{end}}>Scrape with Claude &amp; build playlist</button>
+    </form>
+    {{if not .SpotifyConnected}}<p class="muted">Connect Spotify first.</p>{{end}}
+  </div>
+
+  {{with .Result}}
+  <div class="step done">
+    <h2>Result</h2>
+    <p>Added <strong>{{.FoundCount}}</strong> of {{len .Tracks}} tracks to
+      {{if .PlaylistURL}}<a href="{{.PlaylistURL}}" target="_blank" rel="noopener">{{.PlaylistName}}</a>{{else}}{{.PlaylistName}}{{end}}.</p>
+    <table>
+      <thead><tr><th>Query</th><th>Match</th></tr></thead>
+      <tbody>
+      {{range .Tracks}}
+        <tr>
+          <td>{{.Query}}</td>
+          {{if .Found}}<td>{{.Artist}} — {{.Name}}{{if .URL}} (<a href="{{.URL}}" target="_blank" rel="noopener">open</a>){{end}}</td>
+          {{else}}<td class="miss">not found</td>{{end}}
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</body>
+</html>`))
