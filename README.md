@@ -36,3 +36,26 @@ hardcoded and nothing is written to disk.
 
 A resulting playlist looks like:
 <https://open.spotify.com/playlist/4btEltH544et7aIypESPRO>
+
+## Running in Claude Code on the web
+
+This app talks to Spotify and the BBC, which are **not** on the default
+"Trusted" network allowlist for cloud sessions. The allowlist is an environment
+setting (configured in the web UI, not via a repo file): open the environment
+for editing, set **Network access** to **Custom**, tick *"Also include default
+list of common package managers"* (so Go modules and `api.anthropic.com` keep
+working), and add these **Allowed domains**:
+
+```text
+accounts.spotify.com   # Spotify OAuth token exchange
+api.spotify.com        # Spotify Web API (search, playlists)
+www.bbc.co.uk          # the 1Xtra playlist page that gets scraped
+```
+
+Docs: <https://code.claude.com/docs/en/claude-code-on-the-web#network-access>
+
+> Note: the OAuth flow redirects to `http://localhost:8080/callback`, so the
+> interactive "Connect Spotify" step is meant to be run **locally**. In a cloud
+> session the allowlist above lets the scrape (BBC + Claude) and Spotify Web API
+> calls reach out, but the browser-based OAuth redirect won't resolve to the
+> sandbox.
