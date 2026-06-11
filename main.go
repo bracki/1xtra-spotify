@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"html/template"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -39,6 +40,17 @@ type app struct {
 var a = &app{}
 
 func main() {
+	// Pre-fill credentials from the environment if present, so you can skip the
+	// web form. Any/all of these are optional; missing ones fall back to the UI.
+	a.applyConfig(
+		os.Getenv("ANTHROPIC_API_KEY"),
+		os.Getenv("SPOTIFY_ID"),
+		os.Getenv("SPOTIFY_SECRET"),
+	)
+	if a.configured() {
+		log.Info("Credentials loaded from environment — go straight to 'Connect Spotify'")
+	}
+
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/config", handleConfig)
 	http.HandleFunc("/login", handleLogin)
@@ -68,9 +80,22 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.anthropicKey = r.FormValue("anthropic_key")
-	a.spotifyID = r.FormValue("spotify_id")
-	a.spotifySecret = r.FormValue("spotify_secret")
+	a.applyConfig(
+		r.FormValue("anthropic_key"),
+		r.FormValue("spotify_id"),
+		r.FormValue("spotify_secret"),
+	)
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// applyConfig records the credentials and, once all are present, prepares the
+// Spotify authenticator. Shared by the web form and the env-var bootstrap.
+// Caller must hold a.mu (or be running before the server starts).
+func (a *app) applyConfig(anthropicKey, spotifyID, spotifySecret string) {
+	a.anthropicKey = anthropicKey
+	a.spotifyID = spotifyID
+	a.spotifySecret = spotifySecret
 
 	// Reset any previous Spotify session — the credentials may have changed.
 	a.client = nil
@@ -86,8 +111,6 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		a.auth = auth
 		a.state = randomState()
 	}
-
-	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {

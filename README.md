@@ -21,8 +21,10 @@ You need:
 ## Run
 
 ```
-go run .
+make run        # or: go run .
 ```
+
+`make help` lists the other targets (`build`, `vet`, `tidy`, `clean`).
 
 Then open <http://localhost:8080> and follow the three steps:
 
@@ -33,6 +35,22 @@ Then open <http://localhost:8080> and follow the three steps:
 
 Credentials are entered interactively and kept in memory only — nothing is
 hardcoded and nothing is written to disk.
+
+### Pre-filling credentials from the environment (optional)
+
+Set any of these to skip typing them into the form (all optional; missing ones
+fall back to the UI):
+
+```
+export ANTHROPIC_API_KEY=sk-ant-...
+export SPOTIFY_ID=...
+export SPOTIFY_SECRET=...
+make run
+```
+
+With all three set, the app starts already configured — go straight to
+**Connect Spotify**. The OAuth step is always interactive (browser redirect to
+`http://localhost:8080/callback`); there's no env var for that.
 
 A resulting playlist looks like:
 <https://open.spotify.com/playlist/4btEltH544et7aIypESPRO>
