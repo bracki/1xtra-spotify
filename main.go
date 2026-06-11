@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"html/template"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +42,9 @@ type app struct {
 var a = &app{}
 
 func main() {
+	// Load a .env file (if present) into the environment before reading creds.
+	loadDotEnv(".env")
+
 	// Pre-fill credentials from the environment if present, so you can skip the
 	// web form. Any/all of these are optional; missing ones fall back to the UI.
 	a.applyConfig(
@@ -196,6 +201,35 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	a.lastResult = result
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// loadDotEnv reads KEY=VALUE pairs from a .env file (if present) into the
+// process environment. Real environment variables take precedence, so you can
+// still override the file on the command line. A missing file is not an error.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, val)
+		}
+	}
 }
 
 func randomState() string {

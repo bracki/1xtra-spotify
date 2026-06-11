@@ -3,3 +3,6 @@
 
 # compiled binary
 /1xtra-spotify
+
+# Local credentials — never commit
+.env
